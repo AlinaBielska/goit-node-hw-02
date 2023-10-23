@@ -2,10 +2,11 @@ const userDao = require('./users.dao');
 const authService = require('../auth/auth.service');
 const gravatar = require('gravatar');
 const jimp = require('jimp');
-
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs/promises');
+const User = require('./user.schema');
+const { sendUserVerificationMail } = require('./user.mailer');
 
 const upload = multer({
     dest: path.join(__dirname, 'tmp'),
@@ -19,6 +20,8 @@ const signUpHandler = async (req, res, next) => {
         const { email, password } = req.body;
         const avatarURL = gravatar.url(req.body.email, { default: 'retro'}, true);
         const createdUser = await userDao.createUser({ email, password, avatarURL });
+
+        await sendUserVerificationMail(createdUser.email, createdUser.verificationToken);
         
         return res.status(201).send({
             user: {
@@ -38,10 +41,14 @@ const signUpHandler = async (req, res, next) => {
 
 const loginHandler = async (req, res, next) => {
     try {
-        const userEntity = await userDao.getUser(req.body.email);
+        const userEntity = await userDao.getUser({ email: req.body.email });
 
         if (!userEntity || !await userEntity.validatePassword(req.body.password)) {
             return res.status(402).send({message: 'Wrong credentials'})
+       };
+
+       if (!userEntity.verify) {
+        return res.status(403).send({ message: 'User is not verified' })
        };
 
         const userPayload = {
@@ -94,6 +101,44 @@ const changeAvatar = async (req, res, next) => {
     }
 };
 
+const verifyHandler = async (req, res, next) => {
+    try {
+        const { verificationToken } = req.params;
+        const user = await userDao.getUser({ verificationToken });
+
+        if (!user) { 
+            return res.status(400).send({ message: 'Verification token is not valid or expired' })
+        }
+        if (user.verify) {
+            return res.status(400).send({ message: 'User is already verified' })
+        } else (
+            await userDao.updateUser(user.email, { verify: true, verificationToken: null })
+        )
+
+        return res.status(200).send({ message: 'User has been verified' });
+    } catch (e) {
+        return next(e);
+    }
+};
+
+const resendVerificationHandler = async (req, res, next) => {
+    try {
+        const user = await userDao.getUser({ email: req.body.email });
+        if (!user) {
+            return res.status(404).send({ message: 'User does not exist '});
+        }
+        if (user.verify) {
+            return res.status(400).send({ message: 'User is already verified'});
+        } else {
+            await sendUserVerificationMail(user.email, user.verificationToken);
+        }
+
+        return res.status(204).send();
+    } catch {
+        return next(e);
+    }
+}
+
 module.exports = {
     signUpHandler,
     loginHandler,
@@ -101,4 +146,6 @@ module.exports = {
     currentHandler,
     changeAvatar,
     upload,
+    verifyHandler,
+    resendVerificationHandler,
 };
